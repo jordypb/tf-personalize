@@ -1,58 +1,58 @@
+provider "aws" {
+  alias  = "central"
+  region = "us-west-2"
+}
+
 ########################
 ## AWS-PERSONALIZE
 ########################
 
 resource "null_resource" "config_helm" {
-  depends_on = [
-    aws_s3_bucket.personalize_bucket
-  ]
-
+  # depends_on = [
+  #   aws_s3_bucket.personalize_bucket
+  # ]
   triggers = {
     timestamp = timestamp()
   }
-
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     working_dir = path.cwd
     command     = <<EOS
 set -euo pipefail
 echo '============================='
-#
-echo $
+
+
+
 sleep 5
-workname="sprint23"
-echo $workname
-aws s3 ls s3://jordypersonalize-qa/ --profile qa_profile || true
-aws s3 cp doc.csv s3://jordypersonalize-qa/ --profile qa_profile
-aws personalize create-dataset-group --name group-tf-person --profile qa_profile || true
-arn_dataset_group=$(aws personalize  list-dataset-groups --profile qa_profile | grep 'arn' | grep 'group-tf-person' | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 
 
+aws s3 cp doc.csv s3://${aws_s3_bucket.personalize_bucket.id}/ --profile ${var.profile}
+aws personalize create-dataset-group --name ${aws_s3_bucket.personalize_bucket.id} --profile ${var.profile} || true
+arn_dataset_group=$(aws personalize list-dataset-groups --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+
+sleep 15
 aws personalize create-schema \
-  --name tf-schema \
-  --schema file://schema.json --profile qa_profile || true
+  --name ${aws_s3_bucket.personalize_bucket.id} \
+  --schema file://schema.json --profile ${var.profile} || true
+arn_schema=$(aws personalize list-schemas --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 
-arn_schema=$(aws personalize list-schemas --profile qa_profile | grep 'arn' | grep 'schematest' | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
-
+sleep 15
 aws personalize create-dataset \
-  --name tf-person-dataset \
+  --name ${aws_s3_bucket.personalize_bucket.id} \
   --dataset-group-arn $arn_dataset_group \
   --dataset-type Interactions \
-  --schema-arn $arn_schema --profile qa_profile || true
-arn_dataset=$(aws personalize list-datasets --profile qa_profile | grep 'arn' | grep 'group-tf-person' | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+  --schema-arn $arn_schema --profile ${var.profile} || true
+arn_dataset=$(aws personalize list-datasets --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 
+sleep 20
 aws personalize create-dataset-import-job \
-  --job-name tf-person \
+  --job-name ${aws_s3_bucket.personalize_bucket.id} \
   --dataset-arn $arn_dataset \
-  --data-source dataLocation=s3://jordypersonalize-qa/doc.csv \
-  --role-arn arn:aws:iam::255366181314:role/role_personalize --profile qa_profile || true
+  --data-source dataLocation=s3://${aws_s3_bucket.personalize_bucket.id}/doc.csv \
+  --role-arn ${aws_iam_role.role_personalize.arn} --profile ${var.profile} || true
+arn_dataset_import_job=$(aws personalize list-dataset-import-jobs --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 
-arn_dataset_import_job=$(aws personalize list-dataset-import-jobs  --profile qa_profile |grep 'arn' | grep 'tf-person' | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 
-echo $arn_dataset_group
-echo $arn_schema
-echo $arn_dataset
-echo $arn_dataset_import_job
 
 echo 
 EOS
@@ -66,10 +66,29 @@ EOS
 ########################
 ## S3
 ########################
+
+data "aws_iam_policy_document" "s3_policy" {
+  statement {
+      principals {
+          type        = "Service"
+          identifiers = ["personalize.amazonaws.com"]
+      }
+      actions = [
+          "s3:GetObject",
+          "s3:ListBucket"
+      ]
+      resources = [
+          "arn:aws:s3:::${var.name}-${var.tag_environment}",
+          "arn:aws:s3:::${var.name}-${var.tag_environment}/*"
+      ]
+  }
+}
+
 resource "aws_s3_bucket" "personalize_bucket" {
+  # provider = aws.central
   bucket = "${var.name}-${var.tag_environment}"
-  acl    = "public-read"
-  #  policy = data.aws_iam_policy_document.website_policy.json
+  acl    = "private"
+  policy = data.aws_iam_policy_document.s3_policy.json
   lifecycle {
     prevent_destroy = false
   }
@@ -79,11 +98,20 @@ resource "aws_s3_bucket" "personalize_bucket" {
   }
 }
 
+resource "aws_s3_bucket_public_access_block" "bucket_access_block" {
+  bucket = aws_s3_bucket.personalize_bucket.id
+  block_public_acls   = true
+  block_public_policy = true
+}
+
+
+output "bucket_name" {
+  value=aws_s3_bucket.personalize_bucket.id
+}
 
 ########################
 ## IAM
 ########################
-# https://stackoverflow.com/questions/44565879/terraform-error-creating-iam-role-malformedpolicydocument-has-prohibited-fiel
 resource "aws_iam_role" "role_personalize" {
   name = "role_personalize"
 
@@ -110,9 +138,13 @@ EOF
     tag-key = var.tag_environment
   }
 }
-resource "aws_iam_role_policy_attachment" "ec2-read-only-policy-attachment" {
+resource "aws_iam_role_policy_attachment" "PersonalizeFull" {
     role = aws_iam_role.role_personalize.name
     policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonPersonalizeFullAccess"
+}
+resource "aws_iam_role_policy_attachment" "S3Full" {
+    role = aws_iam_role.role_personalize.name
+    policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
 output "iam_arn" {
