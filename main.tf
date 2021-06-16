@@ -27,22 +27,23 @@ aws s3 ls s3://${aws_s3_bucket.personalize_bucket.id}/ --region ${var.region} --
 aws s3 cp doc.csv s3://${aws_s3_bucket.personalize_bucket.id}/  --region ${var.region} --profile ${var.profile}
 aws personalize create-dataset-group --name ${aws_s3_bucket.personalize_bucket.id}  --region ${var.region} --profile ${var.profile} || true
 arn_dataset_group=$(aws personalize list-dataset-groups  --region ${var.region} --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1 | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_dataset_group >> output.txt
 
-
-sleep 40
+sleep 30
 aws personalize create-schema \
   --name ${aws_s3_bucket.personalize_bucket.id} \
   --schema file://schema.json --region ${var.region} --profile ${var.profile} || true
 arn_schema=$(aws personalize list-schemas  --region ${var.region} --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1  | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_schema >> output.txt
 
-
-sleep 40
+sleep 30
 aws personalize create-dataset \
   --name ${aws_s3_bucket.personalize_bucket.id} \
   --dataset-group-arn $arn_dataset_group \
   --dataset-type Interactions \
   --schema-arn $arn_schema --region ${var.region} --profile ${var.profile} || true
 arn_dataset=$(aws personalize list-datasets --region ${var.region} --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1  | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_dataset >> output.txt
 
 sleep 120
 aws personalize create-dataset-import-job \
@@ -51,6 +52,7 @@ aws personalize create-dataset-import-job \
   --data-source dataLocation=s3://${aws_s3_bucket.personalize_bucket.id}/doc.csv \
   --role-arn ${aws_iam_role.role_personalize.arn} --region ${var.region} --profile ${var.profile} || true
 arn_dataset_import_job=$(aws personalize list-dataset-import-jobs --region ${var.region} --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1  | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_dataset_import_job >> output.txt
 
 sleep 240
 arn_recipe=$(aws personalize list-recipes --region ${var.region} --profile ${var.profile}  | grep 'arn' | grep 'aws-user-personalization' | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
@@ -58,20 +60,25 @@ aws personalize create-solution \
   --name ${aws_s3_bucket.personalize_bucket.id} \
   --dataset-group-arn $arn_dataset_group \
   --recipe-arn $arn_recipe --region ${var.region} --profile ${var.profile} || true
-#aws personalize describe-solution --solution-arn arn:aws:personalize:us-west-2:acct-id:solution/MovieSolution  --region ${var.region} --profile ${var.profile}
 arn_solution=$(aws personalize list-solutions --region ${var.region} --profile ${var.profile} | grep 'arn' | grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1 | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')  
+echo $arn_solution >> output.txt
 
+sleep 30
 aws personalize create-solution-version \
-  --solution-arn solution $arn_solution --region ${var.region} --profile ${var.profile} || true
+  --solution-arn $arn_solution --region ${var.region} --profile ${var.profile} || true
+sleep 1500
+arn_solution_version=$(aws personalize list-solution-versions --solution-arn $arn_solution --region ${var.region} --profile ${var.profile}| grep "${aws_s3_bucket.personalize_bucket.id}" | tail -n1 | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_solution_version >> output.txt
 
-sleep 200
-arn_solution_version=$(aws personalize list-solution-versions --solution-arn $arn_solution --region ${var.region} --profile ${var.profile}| grep "${aws_s3_bucket.personalize_bucket.id}" | head -n1 | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
 aws personalize create-campaign \
   --name ${aws_s3_bucket.personalize_bucket.id} \
   --solution-version-arn $arn_solution_version \
   --min-provisioned-tps 1 --region ${var.region} --profile ${var.profile} || true
+sleep 720
+arn_campaign=$(aws personalize list-campaigns --solution-arn $arn_solution --region ${var.region} --profile ${var.profile}| grep "${aws_s3_bucket.personalize_bucket.id}" | grep arn | head -n1 | awk '{print $2}' | sed 's/.$//' | sed -e 's/^"//' -e 's/"$//')
+echo $arn_campaign >> output.txt
 
-#aws personalize create-event-tracker --name saleor-prod --dataset-group-arn $arn_dataset_group --region ${var.region} --profile ${var.profile}
+
 
 echo 
 EOS
@@ -113,7 +120,7 @@ resource "aws_s3_bucket" "personalize_bucket" {
   }
   force_destroy = true
   provisioner "local-exec" {
-    command = "echo ${self.bucket_domain_name} >> aws_s3_bucket.txt"
+    command = "echo ${self.bucket_domain_name} >> output.txt"
   }
 }
 
@@ -132,7 +139,7 @@ output "bucket_name" {
 ## IAM
 ########################
 resource "aws_iam_role" "role_personalize" {
-  name = "role_personalize"
+  name = "${var.name}-${var.tag_environment}"
 
   # Terraform's "jsonencode" function converts a
   # Terraform expression result to valid JSON syntax.
